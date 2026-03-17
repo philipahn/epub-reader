@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -517,6 +518,38 @@
   }
   .goto-tab.active { background: var(--accent); border-color: var(--accent); color: var(--bg); }
 
+  .goto-result-item {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .goto-result-item:hover { border-color: var(--accent); }
+  .goto-result-item.selected { border-color: var(--accent); background: rgba(232,197,71,0.08); }
+  .goto-result-chapter {
+    font-size: 10px;
+    color: var(--text3);
+    font-family: 'Courier New', monospace;
+    margin-bottom: 3px;
+  }
+  .goto-result-text {
+    font-size: 12px;
+    color: var(--text2);
+    font-style: italic;
+    line-height: 1.5;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .goto-result-text mark {
+    background: rgba(232,197,71,0.3);
+    color: var(--text);
+    border-radius: 2px;
+  }
+
   .new-book-btn {
     margin: 16px 20px;
     width: calc(100% - 40px);
@@ -840,17 +873,19 @@
 
     <!-- Mode tabs -->
     <div style="display:flex; gap:6px;">
-      <button class="goto-tab active" id="tab-kindle" onclick="switchGotoTab('kindle')">Kindle Location</button>
+      <button class="goto-tab active" id="tab-text" onclick="switchGotoTab('text')">Search by text</button>
       <button class="goto-tab" id="tab-chapter" onclick="switchGotoTab('chapter')">Chapter / Para</button>
     </div>
 
-    <!-- Kindle Location mode -->
-    <div id="goto-mode-kindle">
+    <!-- Text search mode -->
+    <div id="goto-mode-text" style="display:flex; flex-direction:column; gap:10px;">
       <div class="goto-row">
-        <label>Location</label>
-        <input class="goto-input" id="goto-kindle-loc" type="number" min="1" placeholder="e.g. 3421" oninput="matchGotoKindle()">
+        <label>Words</label>
+        <input class="goto-input" id="goto-text-query" type="text" placeholder="Type a few exact words…" oninput="matchGotoText()">
       </div>
-      <div class="goto-matches" id="goto-kindle-label"></div>
+      <div class="goto-matches" id="goto-text-label"></div>
+      <!-- Results picker — shown when multiple matches -->
+      <div id="goto-text-results" style="display:none; flex-direction:column; gap:4px; max-height:180px; overflow-y:auto;"></div>
     </div>
 
     <!-- Chapter / Para mode -->
@@ -1500,18 +1535,18 @@ document.addEventListener('visibilitychange', () => {
 // ── GOTO LOCATION ──
 let gotoPanelOpen = false;
 let matchedChapterIdx = -1;
-let gotoMode = 'kindle'; // 'kindle' | 'chapter'
+let matchedParaIdx = -1;
+let gotoMode = 'text';
 
 function switchGotoTab(mode) {
   gotoMode = mode;
-  document.getElementById('tab-kindle').classList.toggle('active', mode === 'kindle');
+  document.getElementById('tab-text').classList.toggle('active', mode === 'text');
   document.getElementById('tab-chapter').classList.toggle('active', mode === 'chapter');
-  document.getElementById('goto-mode-kindle').style.display  = mode === 'kindle'  ? 'flex' : 'none';
+  document.getElementById('goto-mode-text').style.display    = mode === 'text'    ? 'flex' : 'none';
   document.getElementById('goto-mode-chapter').style.display = mode === 'chapter' ? 'flex' : 'none';
-  document.getElementById('goto-mode-kindle').style.flexDirection  = 'column';
-  document.getElementById('goto-mode-chapter').style.flexDirection = 'column';
   document.getElementById('goto-go-btn').disabled = true;
   matchedChapterIdx = -1;
+  matchedParaIdx = -1;
 }
 
 function toggleGotoPanel() {
@@ -1519,64 +1554,107 @@ function toggleGotoPanel() {
   document.getElementById('goto-panel').classList.toggle('open', gotoPanelOpen);
   document.getElementById('goto-toggle').classList.toggle('open', gotoPanelOpen);
   if (gotoPanelOpen) {
-    document.getElementById('goto-kindle-loc').value = '';
+    document.getElementById('goto-text-query').value = '';
     document.getElementById('goto-chapter').value = '';
     document.getElementById('goto-para').value = '';
-    document.getElementById('goto-kindle-label').textContent = '';
+    document.getElementById('goto-text-label').textContent = '';
     document.getElementById('goto-match-label').textContent = '';
-    document.getElementById('goto-kindle-label').className = 'goto-matches';
-    document.getElementById('goto-match-label').className = 'goto-matches';
+    document.getElementById('goto-text-results').style.display = 'none';
+    document.getElementById('goto-text-results').innerHTML = '';
     document.getElementById('goto-go-btn').disabled = true;
     matchedChapterIdx = -1;
-    switchGotoTab('kindle');
-    setTimeout(() => document.getElementById('goto-kindle-loc').focus(), 50);
+    matchedParaIdx = -1;
+    switchGotoTab('text');
+    setTimeout(() => document.getElementById('goto-text-query').focus(), 50);
   }
 }
 
-// Build a flat index of all paragraphs with their kindle locations for fast lookup
-function buildKindleIndex() {
-  const index = [];
-  chapters.forEach((ch, ci) => {
-    (ch.kindleLocations || []).forEach((loc, pi) => {
-      index.push({ loc, ci, pi });
-    });
-  });
-  return index;
-}
+// ── TEXT SEARCH ──
+const MAX_RESULTS = 20;
 
-function matchGotoKindle() {
-  const val = parseInt(document.getElementById('goto-kindle-loc').value);
-  const label = document.getElementById('goto-kindle-label');
-  const goBtn = document.getElementById('goto-go-btn');
+function matchGotoText() {
+  const query = document.getElementById('goto-text-query').value.trim().toLowerCase();
+  const label  = document.getElementById('goto-text-label');
+  const results = document.getElementById('goto-text-results');
+  const goBtn  = document.getElementById('goto-go-btn');
 
-  if (!val || val < 1) {
-    label.textContent = '';
-    label.className = 'goto-matches';
-    goBtn.disabled = true;
-    matchedChapterIdx = -1;
+  // Reset
+  results.style.display = 'none';
+  results.innerHTML = '';
+  label.className = 'goto-matches';
+  goBtn.disabled = true;
+  matchedChapterIdx = -1;
+  matchedParaIdx = -1;
+
+  if (query.length < 3) {
+    label.textContent = query.length > 0 ? 'Type at least 3 characters…' : '';
     return;
   }
 
-  // Find the paragraph whose kindle location is closest to val
-  const index = buildKindleIndex();
-  if (index.length === 0) { label.textContent = 'No location data'; return; }
-
-  let best = index[0], bestDiff = Math.abs(index[0].loc - val);
-  for (const entry of index) {
-    const diff = Math.abs(entry.loc - val);
-    if (diff < bestDiff) { bestDiff = diff; best = entry; }
+  // Find exact substring matches across all paragraphs
+  const matches = [];
+  for (let ci = 0; ci < chapters.length; ci++) {
+    const ch = chapters[ci];
+    for (let pi = 0; pi < ch.paragraphs.length; pi++) {
+      if (ch.paragraphs[pi].toLowerCase().includes(query)) {
+        matches.push({ ci, pi });
+        if (matches.length > MAX_RESULTS) break;
+      }
+    }
+    if (matches.length > MAX_RESULTS) break;
   }
 
-  matchedChapterIdx = best.ci;
-  // Store para too for kindle mode
-  matchedChapterIdx = best.ci;
-  window._gotoKindlePara = best.pi;
+  if (matches.length === 0) {
+    label.textContent = 'No matches found.';
+    label.className = 'goto-matches notfound';
+    return;
+  }
 
-  const ch = chapters[best.ci];
-  const actualLoc = ch.kindleLocations[best.pi];
-  label.textContent = `✓ Loc ~${actualLoc} → "${ch.title}", para ${best.pi + 1}`;
-  label.className = 'goto-matches found';
-  goBtn.disabled = false;
+  if (matches.length === 1) {
+    // Single match — select it automatically
+    matchedChapterIdx = matches[0].ci;
+    matchedParaIdx    = matches[0].pi;
+    const ch = chapters[matches[0].ci];
+    label.textContent = `✓ Found in "${ch.title}", para ${matches[0].pi + 1}`;
+    label.className = 'goto-matches found';
+    goBtn.disabled = false;
+    return;
+  }
+
+  // Multiple matches — show picker
+  label.textContent = `${matches.length}${matches.length > MAX_RESULTS ? '+' : ''} matches — pick one:`;
+  label.className = 'goto-matches';
+  results.style.display = 'flex';
+
+  matches.forEach(({ ci, pi }, idx) => {
+    const ch   = chapters[ci];
+    const text = ch.paragraphs[pi];
+    const item = document.createElement('div');
+    item.className = 'goto-result-item';
+    item.dataset.ci = ci;
+    item.dataset.pi = pi;
+
+    // Highlight the matched query within the snippet
+    const lc = text.toLowerCase();
+    const matchStart = lc.indexOf(query);
+    const before = text.slice(Math.max(0, matchStart - 40), matchStart);
+    const matched = text.slice(matchStart, matchStart + query.length);
+    const after  = text.slice(matchStart + query.length, matchStart + query.length + 80);
+    const snippet = (matchStart > 40 ? '…' : '') + before + `<mark>${matched}</mark>` + after + '…';
+
+    item.innerHTML = `
+      <div class="goto-result-chapter">${ch.title} · para ${pi + 1}</div>
+      <div class="goto-result-text">${snippet}</div>`;
+
+    item.addEventListener('click', () => {
+      document.querySelectorAll('.goto-result-item').forEach(el => el.classList.remove('selected'));
+      item.classList.add('selected');
+      matchedChapterIdx = ci;
+      matchedParaIdx    = pi;
+      goBtn.disabled = false;
+    });
+    results.appendChild(item);
+  });
 }
 
 function matchGotoChapter() {
@@ -1595,6 +1673,7 @@ function matchGotoChapter() {
   const num = parseInt(query);
   if (!isNaN(num) && num >= 1 && num <= chapters.length) {
     matchedChapterIdx = num - 1;
+    matchedParaIdx = 0;
     label.textContent = `✓ Found: "${chapters[matchedChapterIdx].title}"`;
     label.className = 'goto-matches found';
     goBtn.disabled = false;
@@ -1618,6 +1697,7 @@ function matchGotoChapter() {
 
   if (bestIdx >= 0 && bestScore >= 30) {
     matchedChapterIdx = bestIdx;
+    matchedParaIdx = 0;
     label.textContent = `✓ Matched: "${chapters[bestIdx].title}"`;
     label.className = 'goto-matches found';
     goBtn.disabled = false;
@@ -1630,12 +1710,10 @@ function matchGotoChapter() {
 }
 
 function applyGoto() {
-  if (matchedChapterIdx < 0) return;
+  if (matchedChapterIdx < 0 || matchedParaIdx < 0) return;
 
-  let targetPara = 0;
-  if (gotoMode === 'kindle') {
-    targetPara = window._gotoKindlePara || 0;
-  } else {
+  let targetPara = matchedParaIdx;
+  if (gotoMode === 'chapter') {
     const paraInput = parseInt(document.getElementById('goto-para').value) || 1;
     const ch = chapters[matchedChapterIdx];
     targetPara = Math.max(0, Math.min(paraInput - 1, ch.paragraphs.length - 1));
@@ -1649,10 +1727,10 @@ function applyGoto() {
   updatePreview(chapters[chapterIdx].paragraphs[paraIdx] || '');
 
   toggleGotoPanel();
-  const card = document.getElementById('pos-kindle');
+  const card = document.getElementById('pos-chapter');
   card.style.transition = 'color 0.3s';
   card.style.color = 'var(--success)';
-  setTimeout(() => { card.style.color = 'var(--accent)'; }, 1400);
+  setTimeout(() => { card.style.color = ''; }, 1400);
 }
 
 // Init
